@@ -8,6 +8,7 @@ use super::{
 };
 
 use std::{cell::RefCell, fs, rc::Rc, thread};
+use std::sync::{Arc, Mutex};
 
 use gtk::{gdk::Display, gdk_pixbuf, gio, glib::Bytes, prelude::*, CssProvider};
 use html_parser::{Dom, Element, Node, Result};
@@ -19,6 +20,12 @@ pub(crate) struct Tag {
     pub classes: Vec<String>,
     pub widget: Box<dyn Luable>,
     pub tied_variables: Vec<String>,
+}
+
+pub(crate) struct Script {
+    pub src: String,
+    pub par: bool,
+    pub ele: Element
 }
 
 fn decode_html_entities<T: AsRef<str>>(s: T) -> String {
@@ -114,7 +121,7 @@ pub async fn build_ui(
         }
     }
 
-    let tags = Rc::new(RefCell::new(Vec::new()));
+    let tags: Arc<Mutex<Vec<Tag>>> = Arc::new(Mutex::new(Vec::new()));
 
     let html_view = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -195,35 +202,105 @@ pub async fn build_ui(
     }
     let provider = css::load_css_into_app(&css);
 
-    let mut scripts: Vec<String> = Vec::new();
+    let mut scripts: Vec<Script> = Vec::new();
     for element in head_elements.children.iter() {
         if let Some(element) = element.element() {
             if element.name == "script" {
                 if let Some(Some(src_attr)) = element.attributes.get("src") {
-                    scripts.push(src_attr.to_string());
+                    let await_attr = match element.attributes.get("await") {
+                        Some(v) if v.as_deref() == Some("false") => false,
+                        _ => true,
+                    };
+                    let script = Script {
+                        src: src_attr.to_string(),
+                        par: !await_attr,
+                        ele: element.clone()
+                    };
+                    scripts.push(script);
                 }
             }
         }
     }
 
-    let tagss = Rc::clone(&tags);
+    let tagss = Arc::clone(&tags);
 
-    for src in scripts {
-        if !src.is_empty() {
-            let luacode = if src.starts_with("https://") {
-                fetch_file(src).await
+    let mut scripts_awa: Vec<Element> = Vec::new();
+    let mut scripts_par: Vec<Element> = Vec::new();
+
+    for script in scripts {
+        if script.par {
+            scripts_awa.push(script.ele)
+        } else {
+            scripts_par.push(script.ele)
+        }
+    }
+
+    for script in scripts_awa {
+        let src = script.attributes.get("src").and_then(|src| src.clone());
+
+        if let Some(src) = src {
+            let src_clone = src.clone(); // Clone src here
+            let luacode = if src_clone.starts_with("https://") {
+                fetch_file(src_clone).await
             } else {
-                fetch_file(format!("{}/{}", furl, src)).await
+                fetch_file(format!("{}/{}", furl, src_clone)).await
             };
-
-            if let Err(e) = super::lua::run(luacode, Rc::clone(&tags), tab.url.clone()).await {
-                println!("ERROR: Failed to run lua: {}", e);
+            if let Err(e) = lua::run(luacode, tags.clone(), tab.url.clone()).await {
+                println!("ERROR: Failed to run lua script from {}: {}", src, e);
+            }
+        } else if let Some(contents) = script.children.first().and_then(|node| node.text()) {
+            if let Err(e) = lua::run(contents.to_string(), tags.clone(), tab.url.clone()).await {
+                println!("ERROR: Failed to run inline lua script: {}", e);
             }
         }
     }
 
+    use tokio::task;
 
-    for tag in tagss.borrow_mut().iter_mut() {
+    let futures: Vec<_> = scripts_par.into_iter().map(|script| {
+        let tags = Arc::clone(&tags);
+        let tab_url = tab.url.clone();
+        let src = script.attributes.get("src").and_then(|src| src.clone());
+
+        task::spawn(async move {
+            if let Some(src) = src {
+                let src_clone = src.clone(); // Clone src here
+                let luacode = if src_clone.starts_with("https://") {
+                    fetch_file(src_clone).await
+                } else {
+                    fetch_file(format!("{}/{}", furl, src_clone)).await
+                };
+
+                if let Err(e) = lua::run(luacode, tags.clone(), tab_url.clone()).await {
+                    println!("ERROR: Failed to run lua script from {}: {}", src, e);
+                }
+            } else if let Some(contents) = script.children.first().and_then(|node| node.text()) {
+                if let Err(e) = lua::run(contents.to_string(), tags.clone(), tab_url.clone()).await {
+                    println!("ERROR: Failed to run inline lua script: {}", e);
+                }
+            }
+        })
+    }).collect();
+
+
+    // for script in scripts {
+    //     if !script.is_empty() {
+    //         let luacode = if script.starts_with("https://") {
+    //             fetch_file(script).await
+    //         } else {
+    //             fetch_file(format!("{}/{}", furl, script.src)).await
+    //         };
+    //
+    //         tokio::spawn(async move {
+    //             if let Err(e) = super::lua::run(luacode, Arc::clone(&tags), tab.url.clone()).await {
+    //                 println!("ERROR: Failed to run lua: {}", e);
+    //             }
+    //         });
+    //     }
+    // }
+
+    let mut tagss_ref = tagss.lock().unwrap();
+    for tag in tagss_ref.iter_mut() {
         let mut tied_variables = Vec::new();
 
         let text = tag.widget.get_contents_();
@@ -295,7 +372,7 @@ fn render_html(
     contents: Option<&Node>,
     og_html_view: gtk::Box,
     recursive: bool,
-    tags: Rc<RefCell<Vec<Tag>>>,
+    tags: Arc<Mutex<Vec<Tag>>>,
     css: &mut String,
     scroll: Rc<RefCell<gtk::ScrolledWindow>>,
     previous_css_provider: Option<CssProvider>,
@@ -343,8 +420,8 @@ fn render_html(
                     );
                 }
             }
-
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(div_box),
                 tied_variables: Vec::new(),
@@ -366,7 +443,8 @@ fn render_html(
 
                         html_view.append(&label);
 
-                        tags.borrow_mut().push(Tag {
+                        let mut tags_ref = tags.lock().unwrap();
+                        tags_ref.push(Tag {
                             classes: element.classes.clone(),
                             widget: Box::new(label),
                             tied_variables: Vec::new(),
@@ -411,7 +489,7 @@ fn render_html(
                             render_a(
                                 el,
                                 label_box.clone(),
-                                tags.clone(),
+                                Arc::clone(&tags),
                                 css,
                                 scroll.clone(),
                                 previous_css_provider.clone(),
@@ -461,7 +539,8 @@ fn render_html(
             html_view.append(&list_box);
             render_list(element, &list_box, &tags, css);
 
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(list_box),
                 tied_variables: Vec::new(),
@@ -476,7 +555,8 @@ fn render_html(
 
             html_view.append(&line);
 
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(line),
                 tied_variables: Vec::new(),
@@ -509,7 +589,8 @@ fn render_html(
                 .valign(gtk::Align::Start)
                 .can_shrink(false)
                 .build();
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(image.clone()),
                 tied_variables: Vec::new(),
@@ -547,7 +628,8 @@ fn render_html(
 
                 html_view.append(&entry);
 
-                tags.borrow_mut().push(Tag {
+                let mut tags_ref = tags.lock().unwrap();
+                tags_ref.push(Tag {
                     classes: element.classes.clone(),
                     widget: Box::new(entry),
                     tied_variables: Vec::new(),
@@ -581,7 +663,8 @@ fn render_html(
 
             html_view.append(&dropdown);
 
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(dropdown),
                 tied_variables: Vec::new(),
@@ -604,7 +687,8 @@ fn render_html(
 
             html_view.append(&textview);
 
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(textview),
                 tied_variables: Vec::new(),
@@ -630,7 +714,8 @@ fn render_html(
 
             html_view.append(&button);
 
-            tags.borrow_mut().push(Tag {
+            let mut tags_ref = tags.lock().unwrap();
+            tags_ref.push(Tag {
                 classes: element.classes.clone(),
                 widget: Box::new(button),
                 tied_variables: Vec::new(),
@@ -645,7 +730,7 @@ fn render_html(
 fn render_a(
     el: &Element,
     label_box: gtk::Box,
-    tags: Rc<RefCell<Vec<Tag>>>,
+    tags: Arc<Mutex<Vec<Tag>>>,
     css: &mut String,
     scroll: Rc<RefCell<gtk::ScrolledWindow>>,
     previous_css_provider: Option<CssProvider>,
@@ -698,7 +783,8 @@ fn render_a(
 
     label_box.append(&link_button);
 
-    tags.borrow_mut().push(Tag {
+    let mut tags_ref = tags.lock().unwrap();
+    tags_ref.push(Tag {
         classes: el.classes.clone(),
         widget: Box::new(link_button),
         tied_variables: Vec::new(),
@@ -708,7 +794,7 @@ fn render_a(
 fn render_list(
     element: &Element,
     list_box: &gtk::Box,
-    tags: &Rc<RefCell<Vec<Tag>>>,
+    tags: &Arc<Mutex<Vec<Tag>>>,
     css: &mut String,
 ) {
     for (i, child) in element.children.iter().enumerate() {
@@ -743,7 +829,8 @@ fn render_list(
 
                     list_box.append(&li);
 
-                    tags.borrow_mut().push(Tag {
+                    let mut tags_ref = tags.lock().unwrap();
+                    tags_ref.push(Tag {
                         classes: el.classes.clone(),
                         widget: Box::new(label),
                         tied_variables: Vec::new(),
@@ -915,7 +1002,7 @@ async fn fetch_from_github(url: String) -> String {
     }
 }
 
-fn render_p(child: &Node, element: &Element, label_box: &gtk::Box, css: &mut String, tags: &Rc<RefCell<Vec<Tag>>>){
+fn render_p(child: &Node, element: &Element, label_box: &gtk::Box, css: &mut String, tags: &Arc<Mutex<Vec<Tag>>>){
     let label = gtk::Label::builder()
         .label(&decode_html_entities(child.text().unwrap_or("")))
         .css_name(element.name.as_str())
@@ -928,7 +1015,8 @@ fn render_p(child: &Node, element: &Element, label_box: &gtk::Box, css: &mut Str
     label_box.append(&label);
     css.push_str(&label.style());
 
-    tags.borrow_mut().push(Tag {
+    let mut tags_ref = tags.lock().unwrap();
+    tags_ref.push(Tag {
         classes: element.classes.clone(),
         widget: Box::new(label),
         tied_variables: Vec::new(),

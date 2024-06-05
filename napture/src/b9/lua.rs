@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::css::Styleable;
@@ -16,7 +17,6 @@ use serde_json::Map;
 use crate::{lualog, globals::LUA_TIMEOUTS};
 use glib::translate::FromGlib;
 use glib::SourceId;
-use tokio::task::JoinHandle;
 
 pub trait Luable: Styleable {
     fn get_css_name(&self) -> String;
@@ -80,29 +80,29 @@ pub(crate) fn clear_timeout(id: i32) -> LuaResult<()> {
 fn get(
     lua: &Lua,
     class: String,
-    tags: Rc<RefCell<Vec<Tag>>>,
+    tags: Arc<Mutex<Vec<Tag>>>,
     multi: bool
 ) -> LuaResult<LuaTable<>> {
     let global_table = lua.create_table()?;
 
-    let tags_ref = tags.borrow();
+    let tags_ref = tags.lock().unwrap();
 
     let mut i2 = 1;
 
     for (i, tag) in tags_ref.iter().enumerate() {
         if tag.classes.contains(&class) {
-            let tags1 = Rc::clone(&tags);
-            let tags2 = Rc::clone(&tags);
-            let tags3 = Rc::clone(&tags);
-            let tags4 = Rc::clone(&tags);
-            let tags5 = Rc::clone(&tags);
-            let tags6 = Rc::clone(&tags);
-            let tags7 = Rc::clone(&tags);
-            let tags8 = Rc::clone(&tags);
-            let tags9 = Rc::clone(&tags);
-            let tags10 = Rc::clone(&tags);
-            let tags11 = Rc::clone(&tags);
-            let tags12 = Rc::clone(&tags);
+            let tags1 = Arc::clone(&tags);
+            let tags2 = Arc::clone(&tags);
+            let tags3 = Arc::clone(&tags);
+            let tags4 = Arc::clone(&tags);
+            let tags5 = Arc::clone(&tags);
+            let tags6 = Arc::clone(&tags);
+            let tags7 = Arc::clone(&tags);
+            let tags8 = Arc::clone(&tags);
+            let tags9 = Arc::clone(&tags);
+            let tags10 = Arc::clone(&tags);
+            let tags11 = Arc::clone(&tags);
+            let tags12 = Arc::clone(&tags);
 
             let table = lua.create_table()?;
 
@@ -113,7 +113,7 @@ fn get(
             table.set(
                 "get_content",
                 lua.create_function(move |_, ()| {
-                    let ok = tags1.borrow()[i].widget.get_contents_();
+                    let ok = tags1.lock().unwrap()[i].widget.get_contents_();
                     Ok(ok)
                 })?,
             )?;
@@ -123,77 +123,77 @@ fn get(
                     let label = if let Some(label) = label {
                         label
                     } else { "".to_string()};
-                    tags2.borrow()[i].widget.set_contents_(label);
+                    tags2.lock().unwrap()[i].widget.set_contents_(label);
                     Ok(())
                 })?,
             )?;
             table.set(
                 "on_click",
                 lua.create_function(move |_lua, func: OwnedFunction| {
-                    tags3.borrow()[i].widget._on_click(&func);
+                    tags3.lock().unwrap()[i].widget._on_click(&func);
                     Ok(())
                 })?,
             )?;
             table.set(
                 "on_submit",
                 lua.create_function(move |_lua, func: OwnedFunction| {
-                    tags4.borrow()[i].widget._on_submit(&func);
+                    tags4.lock().unwrap()[i].widget._on_submit(&func);
                     Ok(())
                 })?,
             )?;
             table.set(
                 "on_input",
                 lua.create_function(move |_lua, func: OwnedFunction| {
-                    tags5.borrow()[i].widget._on_input(&func);
+                    tags5.lock().unwrap()[i].widget._on_input(&func);
                     Ok(())
                 })?,
             )?;
             table.set(
                 "get_href",
                 lua.create_function(move |_, ()| {
-                    let ok = tags6.borrow()[i].widget.get_href_();
+                    let ok = tags6.lock().unwrap()[i].widget.get_href_();
                     Ok(ok)
                 })?,
             )?;
             table.set(
                 "set_href",
                 lua.create_function(move |_, label: String| {
-                    tags7.borrow()[i].widget.set_href_(label);
+                    tags7.lock().unwrap()[i].widget.set_href_(label);
                     Ok(())
                 })?,
             )?;
             table.set(
                 "get_opacity",
                 lua.create_function(move |_, ()| {
-                    let ok = tags8.borrow()[i].widget.get_opacity_();
+                    let ok = tags8.lock().unwrap()[i].widget.get_opacity_();
                     Ok(ok)
                 })?,
             )?;
             table.set(
                 "set_opacity",
                 lua.create_function(move |_, amount: f64| {
-                    tags9.borrow()[i].widget.set_opacity_(amount);
+                    tags9.lock().unwrap()[i].widget.set_opacity_(amount);
                     Ok(())
                 })?,
             )?;
             table.set(
                 "get_source",
                 lua.create_function(move |_, ()| {
-                    tags10.borrow()[i].widget.get_source_();
+                    tags10.lock().unwrap()[i].widget.get_source_();
                     Ok(())
                 })?,
             )?;
             table.set(
                 "set_source",
                 lua.create_function(move |_, src: String| {
-                    let ok = tags11.borrow()[i].widget.set_source_(src);
+                    let ok = tags11.lock().unwrap()[i].widget.set_source_(src);
                     Ok(ok)
                 })?,
             )?;
             table.set(
                 "set_visible",
                 lua.create_function(move |_, visible: bool| {
-                    let ok = tags12.borrow()[i].widget.set_visible_(visible);
+                    let ok = tags12.lock().unwrap()[i].widget.set_visible_(visible);
                     Ok(ok)
                 })?,
             )?;
@@ -232,7 +232,7 @@ fn print(_lua: &Lua, msg: LuaMultiValue) -> LuaResult<()> {
 }
 
 // todo: make this async if shit breaks
-pub(crate) async fn run(luacode: String, tags: Rc<RefCell<Vec<Tag>>>, taburl: String) -> LuaResult<()> {
+pub(crate) async fn run(luacode: String, tags: Arc<Mutex<Vec<Tag>>>, taburl: String) -> LuaResult<()> {
     let lua = Lua::new_with(
         /*StdLib::COROUTINE | StdLib::STRING |
         StdLib::TABLE | StdLib::MATH,*/
@@ -367,7 +367,7 @@ pub(crate) async fn run(luacode: String, tags: Rc<RefCell<Vec<Tag>>>, taburl: St
             Err(_) => {
                 lualog!(
                     "error",
-                    format!("Failed to parse JSON. Returning null.")
+                    "Failed to parse JSON. Returning null.".to_string()
                 );
                 Ok(lua.null())
             }
@@ -391,9 +391,6 @@ pub(crate) async fn run(luacode: String, tags: Rc<RefCell<Vec<Tag>>>, taburl: St
                     return format!("Failed to send request: {}", e).into();
                 }
             };
-
-            let errcode = Rc::new(RefCell::new(res.status().as_u16()));
-
             let text = res.text().unwrap_or_default();
 
             text

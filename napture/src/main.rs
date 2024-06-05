@@ -588,7 +588,7 @@ fn fetch_dns(url: String) -> String {
 
     let client: reqwest::blocking::ClientBuilder = reqwest::blocking::Client::builder();
 
-    let clienturl = format!(
+    let mut clienturl = format!(
         "{}/domain/{}/{}",
         DNS_SERVER.lock().unwrap().as_str(),
         url.split('.').next().unwrap_or(""),
@@ -596,7 +596,12 @@ fn fetch_dns(url: String) -> String {
             .split('/').next().unwrap_or(""),
     );
 
-    
+    // This is a failsafe to prevent Reqwest from trying to sent a req. to an invalid IP
+    if !clienturl.starts_with("https://") {
+        clienturl = format!("https://{}", clienturl);
+    }
+
+
     let client = match client.build() {
         Ok(client) => client,
         Err(e) => {
