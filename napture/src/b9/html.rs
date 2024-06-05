@@ -195,13 +195,12 @@ pub async fn build_ui(
     }
     let provider = css::load_css_into_app(&css);
 
-    let mut src = String::new();
+    let mut scripts: Vec<String> = Vec::new();
     for element in head_elements.children.iter() {
         if let Some(element) = element.element() {
             if element.name == "script" {
                 if let Some(Some(src_attr)) = element.attributes.get("src") {
-                    src = src_attr.to_string();
-                    break;
+                    scripts.push(src_attr.to_string());
                 }
             }
         }
@@ -209,17 +208,20 @@ pub async fn build_ui(
 
     let tagss = Rc::clone(&tags);
 
-    if !src.is_empty() {
-        let luacode = if src.starts_with("https://") {
-            fetch_file(src).await
-        } else {
-            fetch_file(format!("{}/{}", furl, src)).await
-        };
+    for src in scripts {
+        if !src.is_empty() {
+            let luacode = if src.starts_with("https://") {
+                fetch_file(src).await
+            } else {
+                fetch_file(format!("{}/{}", furl, src)).await
+            };
 
-        if let Err(e) = super::lua::run(luacode, tags, tab.url.clone()).await {
-            println!("ERROR: Failed to run lua: {}", e);
+            if let Err(e) = super::lua::run(luacode, Rc::clone(&tags), tab.url.clone()).await {
+                println!("ERROR: Failed to run lua: {}", e);
+            }
         }
     }
+
 
     for tag in tagss.borrow_mut().iter_mut() {
         let mut tied_variables = Vec::new();

@@ -16,6 +16,7 @@ use serde_json::Map;
 use crate::{lualog, globals::LUA_TIMEOUTS};
 use glib::translate::FromGlib;
 use glib::SourceId;
+use tokio::task::JoinHandle;
 
 pub trait Luable: Styleable {
     fn get_css_name(&self) -> String;
